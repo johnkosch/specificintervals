@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Specific Intervals</title>
+<style>
+  :root { --focus: #005fcc; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: Arial, Helvetica, sans-serif;
+    margin: 0;
+    background: #fff;
+    color: #111;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  main { width: min(760px, 94vw); padding: 36px 28px 44px; text-align: center; }
+  h1 { font-size: 2.25rem; margin: 0 0 16px; }
+  #instructions { font-size: 1.1rem; line-height: 1.5; margin: 0 auto 22px; max-width: 620px; }
+  .controls { display:flex; justify-content:center; align-items:center; gap:10px; margin: 18px 0 24px; }
+  .controls label { display:flex; align-items:center; gap:10px; font-size:1.15rem; font-weight:600; cursor:pointer; }
+  #voiceover { width:22px; height:22px; }
+  #prompt { font-size: clamp(2rem, 6vw, 3rem); font-weight:700; margin: 28px 0; min-height:1.4em; }
+  #answer { width:min(620px, 100%); font-size:1.7rem; padding:18px 20px; border:3px solid #333; border-radius:10px; text-align:center; }
+  button { font-size:1.25rem; padding:15px 28px; border:2px solid #333; border-radius:10px; background:#f3f3f3; cursor:pointer; margin:8px; }
+  button:hover { background:#e8e8e8; }
+  button:focus, input:focus { outline:4px solid var(--focus); outline-offset:3px; }
+  #start { font-size:1.5rem; padding:18px 34px; }
+  #status { font-size:1.35rem; font-weight:700; min-height:1.5em; margin:22px 0 8px; }
+  #detail { font-size:1.1rem; min-height:1.4em; color:#333; }
+  .hidden { display:none !important; }
+  @media (max-width:480px) { main { padding:28px 16px; } h1 { font-size:1.8rem; } #answer { font-size:1.4rem; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Specific Intervals</h1>
+  <p id="instructions">Find the pitch the requested interval above or below the given pitch. Enter the pitch name and press Enter.</p>
+  <div class="controls">
+    <label for="voiceover"><input id="voiceover" type="checkbox" checked> VoiceOver</label>
+  </div>
+  <div id="prompt" aria-live="assertive">Press Enter to begin.</div>
+  <button id="start" type="button">Begin</button>
+  <section id="exercise" class="hidden">
+    <form id="answerForm" autocomplete="off">
+      <label for="answer" style="display:block;font-size:1.1rem;font-weight:600;margin-bottom:10px;">Your answer</label>
+      <input id="answer" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Enter the pitch name and press Enter">
+      <div><button id="submit" type="submit">Submit</button></div>
+    </form>
+    <div id="status" aria-live="assertive"></div>
+    <div id="detail"></div>
+  </section>
+</main>
+<script>
+(() => {
+  const voiceover = document.getElementById('voiceover');
+  const promptEl = document.getElementById('prompt');
+  const startButton = document.getElementById('start');
+  const exercise = document.getElementById('exercise');
+  const answerForm = document.getElementById('answerForm');
+  const answerInput = document.getElementById('answer');
+  const statusEl = document.getElementById('status');
+  const detailEl = document.getElementById('detail');
+
+  const letters = ['C','D','E','F','G','A','B'];
+  const naturalPC = {C:0,D:2,E:4,F:5,G:7,A:9,B:11};
+  const letterIndex = {C:0,D:1,E:2,F:3,G:4,A:5,B:6};
+  const intervals = [
+    {name:'minor second', number:2, semitones:1},
+    {name:'major second', number:2, semitones:2},
+    {name:'minor third', number:3, semitones:3},
+    {name:'major third', number:3, semitones:4},
+    {name:'perfect fourth', number:4, semitones:5},
+    {name:'augmented fourth', number:4, semitones:6},
+    {name:'diminished fifth', number:5, semitones:6},
+    {name:'perfect fifth', number:5, semitones:7},
+    {name:'minor sixth', number:6, semitones:8},
+    {name:'major sixth', number:6, semitones:9},
+    {name:'minor seventh', number:7, semitones:10},
+    {name:'major seventh', number:7, semitones:11},
+    {name:'perfect octave', number:8, semitones:12}
+  ];
+  const sharpNames = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+  const flatNames  = ['C','Db','D','Eb','E','F','Gb','G','Ab','A','Bb','B'];
+  let current = null;
+  let started = false;
+  let waiting = false;
+  let advanceTimer = null;
+
+  function pitchForSpeech(pitch) {
+    return pitch.replace(/#/g, ' sharp').replace(/b/g, ' flat');
+  }
+
+  function speak(text, onFinished) {
+    if (!voiceover.checked || !('speechSynthesis' in window)) {
+      if (onFinished) onFinished();
+      return;
+    }
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 0.92;
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(fallbackTimer);
+      if (onFinished) onFinished();
+    };
+    utterance.onend = finish;
+    utterance.onerror = finish;
+    // Some browsers do not reliably fire onend. Keep the answer visible long enough
+    // for the full spoken feedback before moving to the next question.
+    const fallbackTimer = setTimeout(finish, Math.max(4500, text.length * 110));
+    window.speechSynthesis.speak(utterance);
+  }
+
+  function accidentalFor(letter, targetPC) {
+    let diff = (targetPC - naturalPC[letter] + 12) % 12;
+    if (diff > 6) diff -= 12;
+    if (diff === 0) return '';
+    if (diff === 1) return '#';
+    if (diff === 2) return '##';
+    if (diff === -1) return 'b';
+    if (diff === -2) return 'bb';
+    return null;
+  }
+
+  function spellTarget(baseLetter, interval, direction) {
+    const step = interval.number - 1;
+    const index = letterIndex[baseLetter];
+    const targetLetter = letters[(index + direction * step + 70) % 7];
+    const base = naturalPC[baseLetter];
+    const targetPC = (base + direction * interval.semitones + 120) % 12;
+    const accidental = accidentalFor(targetLetter, targetPC);
+    if (accidental === null || accidental.length > 1) return null;
+    return targetLetter + accidental;
+  }
+
+  function makePrompt() {
+    // Exclude spellings requiring double accidentals so answers stay beginner-friendly.
+    for (let tries = 0; tries < 300; tries++) {
+      const base = letters[Math.floor(Math.random() * letters.length)];
+      const interval = intervals[Math.floor(Math.random() * intervals.length)];
+      const direction = Math.random() < 0.5 ? 1 : -1;
+      const target = spellTarget(base, interval, direction);
+      if (target) {
+        const directionWord = direction === 1 ? 'above' : 'below';
+        return { base, interval, direction, directionWord, target,
+          spoken: `${interval.name} ${directionWord} ${base}`,
+          visible: `${interval.name} ${directionWord} ${base}` };
+      }
+    }
+    return {base:'C', interval:intervals[1], direction:1, directionWord:'above', target:'D', spoken:'major second above C', visible:'major second above C'};
+  }
+
+  function start() {
+    if (started) return;
+    started = true;
+    startButton.classList.add('hidden');
+    exercise.classList.remove('hidden');
+    nextPrompt(true);
+  }
+
+  function nextPrompt(announce) {
+    clearTimeout(advanceTimer);
+    current = makePrompt();
+    waiting = false;
+    promptEl.textContent = current.visible;
+    statusEl.textContent = '';
+    detailEl.textContent = '';
+    answerInput.value = '';
+    answerInput.disabled = false;
+    document.getElementById('submit').disabled = false;
+    answerInput.focus();
+    if (announce) speak(current.spoken);
+  }
+
+  function normalizePitch(value) {
+    let s = value.trim().toUpperCase();
+    s = s.replace(/\s+/g, '').replace(/-/g, '').replace(/♯/g, '#').replace(/♭/g, 'B');
+    s = s.replace(/SHARP/g, '#').replace(/FLAT/g, 'B');
+    s = s.replace(/NATURAL/g, '');
+    const match = s.match(/^([A-G])([#B]*)$/);
+    if (!match) return null;
+    let letter = match[1], acc = match[2];
+    // Accept both BB as B-flat and repeated flat words/symbols, while avoiding malformed mixtures.
+    if (acc.includes('#') && acc.includes('B')) return null;
+    let offset = 0;
+    for (const ch of acc) offset += ch === '#' ? 1 : -1;
+    const pc = (naturalPC[letter] + offset + 120) % 12;
+    return {letter, accidentalOffset: offset, pc};
+  }
+
+  function submitAnswer(event) {
+    event.preventDefault();
+    if (!started || waiting || !current) return;
+    const answer = normalizePitch(answerInput.value);
+    if (!answer) {
+      statusEl.textContent = 'Please enter a pitch name, such as F#, F sharp, or F-sharp.';
+      speak('Please enter a pitch name.');
+      answerInput.focus();
+      return;
+    }
+    waiting = true;
+    answerInput.disabled = true;
+    document.getElementById('submit').disabled = true;
+    const expected = normalizePitch(current.target);
+    // Require the exact written pitch spelling; enharmonic equivalents are incorrect.
+    const correct = answer.letter === expected.letter && answer.accidentalOffset === expected.accidentalOffset;
+    const feedback = correct
+      ? `Correct. ${pitchForSpeech(current.target)}.`
+      : `Not quite. The correct answer is ${pitchForSpeech(current.target)}.`;
+    if (correct) {
+      statusEl.textContent = 'Correct!';
+      detailEl.textContent = `${current.visible} is ${current.target}.`;
+    } else {
+      statusEl.textContent = 'Not quite.';
+      detailEl.textContent = `The correct answer is ${current.target}.`;
+    }
+    // Do not replace the feedback with the next prompt until speech has finished.
+    speak(feedback, () => {
+      advanceTimer = setTimeout(() => nextPrompt(true), 800);
+    });
+  }
+
+  startButton.addEventListener('click', start);
+  answerForm.addEventListener('submit', submitAnswer);
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Enter' && !started && !event.repeat) {
+      event.preventDefault();
+      start();
+    }
+  });
+  voiceover.addEventListener('change', () => {
+    if (!voiceover.checked && 'speechSynthesis' in window) window.speechSynthesis.cancel();
+    else if (started && current) speak(current.spoken);
+  });
+})();
+</script>
+</body>
+</html>
